@@ -3,6 +3,10 @@ const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk');
 const path = require('path');
 const fs = require('fs');
+const { Pool } = require('pg');
+
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+pool.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, email VARCHAR(255) UNIQUE NOT NULL, created_at TIMESTAMP DEFAULT NOW())`).catch(err => console.error('DB init error:', err.message));
 
 const app = express();
 app.use(express.json());
@@ -155,6 +159,31 @@ app.post('/generate', async (req, res) => {
     if (parsed.voiceover) parsed.voiceover = parsed.voiceover.replace(/\[.*?\]/g, '').replace(/\s{2,}/g, ' ').trim();
     res.json({ success: true, ...parsed });
   } catch(err) { res.status(500).json({ success: false, error: err.message }); }
+});
+
+// ── Signup route ──────────────────────────────────────────────
+app.post('/signup', async (req, res) => {
+  const { email } = req.body;
+  if (!email || !email.includes('@')) return res.json({ success: false, error: 'Invalid email' });
+  try {
+    await pool.query('INSERT INTO users (email) VALUES ($1) ON CONFLICT (email) DO NOTHING', [email.toLowerCase().trim()]);
+    res.json({ success: true });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+// ── Admin route ────────────────────────────────────────────────
+app.get('/admin-lm-users', async (req, res) => {
+  const { key } = req.query;
+  if (key !== process.env.ADMIN_KEY) return res.status(403).send('Forbidden');
+  try {
+    const result = await pool.query('SELECT id, email, created_at FROM users ORDER BY created_at DESC');
+    const rows = result.rows.map(r => `<tr><td>${r.id}</td><td>${r.email}</td><td>${new Date(r.created_at).toLocaleString()}</td></tr>`).join('');
+    res.send(`<!DOCTYPE html><html><head><title>LoudMinds Users</title><style>body{font-family:sans-serif;padding:20px;background:#0a0a0a;color:#fff;}table{width:100%;border-collapse:collapse;}th,td{padding:10px;border:1px solid #333;text-align:left;}th{background:#1a1a1a;}h2{color:#c9a247;}</style></head><body><h2>LoudMinds Users (${result.rows.length})</h2><table><tr><th>#</th><th>Email</th><th>Joined</th></tr>${rows}</table></body></html>`);
+  } catch (err) {
+    res.send('DB error: ' + err.message);
+  }
 });
 
 // ── Main UI ───────────────────────────────────────────────────
@@ -427,6 +456,18 @@ input[type="range"]::-moz-range-thumb{width:14px;height:14px;border-radius:50%;b
 </style>
 </head>
 <body>
+
+<!-- Signup Modal -->
+<div id="signupOverlay" style="display:flex;position:fixed;inset:0;background:rgba(0,0,0,0.85);z-index:9999;align-items:center;justify-content:center;">
+  <div style="background:#111;border:1px solid #2a2a2a;border-radius:8px;padding:40px;max-width:420px;width:90%;text-align:center;">
+    <img src="/logo.jpg" alt="LoudMinds" style="width:56px;height:56px;border-radius:50%;object-fit:cover;margin-bottom:16px;">
+    <div style="font-size:1.4rem;font-weight:700;color:#c9a247;margin-bottom:6px;">LoudMinds.Club</div>
+    <div style="font-size:0.85rem;color:#888;margin-bottom:24px;">Dark Psychology Content Studio</div>
+    <input id="signupEmail" type="email" placeholder="Enter your email to get access" style="width:100%;box-sizing:border-box;padding:12px 14px;background:#1a1a1a;border:1px solid #333;border-radius:4px;color:#fff;font-size:0.9rem;margin-bottom:12px;outline:none;">
+    <button onclick="submitSignup()" style="width:100%;padding:12px;background:#c9a247;color:#000;font-weight:700;border:none;border-radius:4px;font-size:0.95rem;cursor:pointer;">Get Free Access 🖤</button>
+    <div id="signupMsg" style="margin-top:12px;font-size:0.8rem;color:#888;"></div>
+  </div>
+</div>
 
 <!-- History Overlay -->
 <div class="hist-overlay" id="histOverlay" onclick="closeHistory()"></div>
@@ -1486,6 +1527,29 @@ function copyBlog() {
     document.getElementById('blogOutro').textContent
   ].join('\\n\\n');
   navigator.clipboard.writeText(text).then(() => alert('Blog post copied!'));
+}
+
+// ── Signup ────────────────────────────────────────────────────
+(function() {
+  const key = 'lm_access_v1';
+  if (localStorage.getItem(key)) {
+    document.getElementById('signupOverlay').style.display = 'none';
+  }
+})();
+
+async function submitSignup() {
+  const email = document.getElementById('signupEmail').value.trim();
+  const msg = document.getElementById('signupMsg');
+  if (!email || !email.includes('@')) { msg.textContent = 'Please enter a valid email.'; msg.style.color = '#e55'; return; }
+  msg.textContent = 'Saving...'; msg.style.color = '#888';
+  const r = await fetch('/signup', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ email }) });
+  const d = await r.json();
+  if (d.success) {
+    localStorage.setItem('lm_access_v1', '1');
+    document.getElementById('signupOverlay').style.display = 'none';
+  } else {
+    msg.textContent = 'Something went wrong. Try again.'; msg.style.color = '#e55';
+  }
 }
 </script>
 </body>
